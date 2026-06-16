@@ -1,0 +1,40 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: blueprint-api
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/blueprint_db
+    username: postgres
+    password: postgres
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    database-platform: org.hibernate.spatial.dialect.postgis.PostgisPG10Dialect
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
+
+blueprint:
+  tile:
+    storage-path: /var/blueprint/tiles
+    tile-size: 256
+    max-zoom: 6
+  collab:
+    heartbeat-interval: 30000
+    max-idle-time: 300000
+
+logging:
+  level:
+    com.blueprint: DEBUG
+    org.hibernate.SQL: INFO
