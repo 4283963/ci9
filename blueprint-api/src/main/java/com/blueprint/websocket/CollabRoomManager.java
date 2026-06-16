@@ -300,6 +300,27 @@ public class CollabRoomManager {
                     builder.geom(geometryFactory.createPoint(new Coordinate(px, py)));
                 }
             }
+            case VOICE -> {
+                Map<String, Object> position = (Map<String, Object>) payload.get("position");
+                Number radius = (Number) payload.get("radius");
+                String voiceUrl = safeStr(payload.get("voiceUrl"));
+                Number duration = (Number) payload.get("duration");
+                String transcript = safeStr(payload.get("transcript"));
+                String voiceId = safeStr(payload.get("id"));
+
+                builder.position(position);
+                builder.radius(radius != null ? radius.doubleValue() : 60d);
+                builder.voiceUrl(voiceUrl);
+                builder.duration(duration != null ? duration.intValue() : 0);
+                builder.voiceId(voiceId);
+                builder.transcript(transcript);
+
+                if (position != null) {
+                    double px = ((Number) position.getOrDefault("x", 0)).doubleValue();
+                    double py = ((Number) position.getOrDefault("y", 0)).doubleValue();
+                    builder.geom(geometryFactory.createPoint(new Coordinate(px, py)));
+                }
+            }
             default -> {
             }
         }

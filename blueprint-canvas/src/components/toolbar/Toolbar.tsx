@@ -7,6 +7,7 @@ const TOOLS: { id: AnnotationTool; label: string; icon: string }[] = [
   { id: 'rect', label: '矩形', icon: '▢' },
   { id: 'circle', label: '圆形', icon: '◯' },
   { id: 'text', label: '文字', icon: 'T' },
+  { id: 'voice', label: '语音', icon: '🎤' },
 ];
 
 const COLORS = ['#ff3b30', '#ff9500', '#ffcc00', '#34c759', '#007aff', '#af52de', '#ff2d55'];

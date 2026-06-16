@@ -23,7 +23,7 @@ export interface ViewState {
   scale: number;
 }
 
-export type AnnotationTool = 'select' | 'pen' | 'rect' | 'circle' | 'text';
+export type AnnotationTool = 'select' | 'pen' | 'rect' | 'circle' | 'text' | 'voice';
 
 export interface BaseAnnotation {
   id: string;
@@ -58,7 +58,21 @@ export interface TextAnnotation extends BaseAnnotation {
   text: string;
 }
 
-export type Annotation = PenAnnotation | RectAnnotation | CircleAnnotation | TextAnnotation;
+export interface VoiceAnnotation extends BaseAnnotation {
+  tool: 'voice';
+  position: Point;
+  radius: number;
+  voiceUrl: string;
+  duration: number;
+  transcrpit?: string;
+}
+
+export type Annotation =
+  | PenAnnotation
+  | RectAnnotation
+  | CircleAnnotation
+  | TextAnnotation
+  | VoiceAnnotation;
 
 export interface CollaborativeUser {
   id: string;
@@ -84,4 +98,11 @@ export interface WSMessage<T = unknown> {
   senderId: string;
   timestamp: number;
   blueprintId: string;
+}
+
+export interface VoiceUploadResponse {
+  id: string;
+  url: string;
+  duration: number;
+  size: number;
 }

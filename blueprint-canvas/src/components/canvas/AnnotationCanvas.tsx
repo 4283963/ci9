@@ -1,14 +1,17 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import { useCanvasStore } from '../../store/canvasStore';
-import { screenToWorld, worldToScreen } from '../../utils/geometry';
+import { getDistance, screenToWorld, worldToScreen } from '../../utils/geometry';
+import { useVoiceRecorder } from '../../hooks/useVoiceRecorder';
+import { uploadVoice } from '../../services/voiceApi';
 import type {
   Annotation,
-  PenAnnotation,
-  RectAnnotation,
   CircleAnnotation,
-  TextAnnotation,
+  PenAnnotation,
   Point,
+  RectAnnotation,
+  TextAnnotation,
   ViewState,
+  VoiceAnnotation,
 } from '../../types';
 
 interface AnnotationCanvasProps {
@@ -20,6 +23,9 @@ interface AnnotationCanvasProps {
 function generateId() {
   return `ann_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
+
+const DEFAULT_VOICE_RADIUS = 60;
+const PLAYING_PULSE_PERIOD = 1200;
 
 export function AnnotationCanvas({
   onDrawingStart,
@@ -42,6 +48,21 @@ export function AnnotationCanvas({
   const animationRef = useRef<number>(0);
   const userIdRef = useRef<string>('local_user');
 
+  const {
+    state: recording,
+    startRecording,
+    stopRecording,
+    cancelRecording,
+  } = useVoiceRecorder();
+
+  const voiceAnchorRef = useRef<{ point: Point; id: string } | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const playingIdRef = useRef<string | null>(null);
+  const pulseStartRef = useRef<number>(0);
+
+  const [hoverVoiceId, setHoverVoiceId] = useState<string | null>(null);
+  const [uploading, setUploading] = useState<{ id: string; progress: number } | null>(null);
+
   useEffect(() => {
     viewRef.current = view;
     scheduleRender();
@@ -54,7 +75,7 @@ export function AnnotationCanvas({
 
   useEffect(() => {
     scheduleRender();
-  }, [annotations, users]);
+  }, [annotations, users, hoverVoiceId, recording.isRecording, recording.duration, recording.amplitude, uploading]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -75,6 +96,15 @@ export function AnnotationCanvas({
     const ro = new ResizeObserver(resize);
     ro.observe(container);
     return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+    };
   }, []);
 
   const scheduleRender = useCallback(() => {
@@ -98,11 +128,29 @@ export function AnnotationCanvas({
     ctx.clearRect(0, 0, rect.width, rect.height);
 
     for (const ann of annotations) {
-      drawAnnotation(ctx, ann, v);
+      drawAnnotation(ctx, ann, v, false, {
+        hovered: hoverVoiceId === ann.id,
+        playing: playingIdRef.current === ann.id,
+        nowTs: performance.now(),
+      });
     }
 
     if (drawingRef.current) {
       drawAnnotation(ctx, drawingRef.current, v, true);
+    }
+
+    if (recording.isRecording && voiceAnchorRef.current) {
+      drawRecordingIndicator(
+        ctx,
+        voiceAnchorRef.current.point,
+        v,
+        recording.duration,
+        recording.amplitude,
+      );
+    }
+
+    if (uploading && voiceAnchorRef.current) {
+      drawUploadIndicator(ctx, voiceAnchorRef.current.point, v, uploading.progress);
     }
 
     for (const user of Object.values(users)) {
@@ -110,13 +158,25 @@ export function AnnotationCanvas({
         drawCursor(ctx, user.cursor, user.color, user.name, v);
       }
     }
-  }, [annotations, users]);
+
+    if (playingIdRef.current) {
+      if (performance.now() - pulseStartRef.current > PLAYING_PULSE_PERIOD) {
+        pulseStartRef.current = performance.now();
+      }
+      scheduleRender();
+    }
+  }, [annotations, users, hoverVoiceId, recording.isRecording, recording.duration, recording.amplitude, uploading]);
 
   function drawAnnotation(
     ctx: CanvasRenderingContext2D,
     ann: Annotation,
     view: ViewState,
     isDrawing = false,
+    opts?: {
+      hovered?: boolean;
+      playing?: boolean;
+      nowTs?: number;
+    },
   ) {
     ctx.save();
     ctx.strokeStyle = ann.color;
@@ -177,8 +237,184 @@ export function AnnotationCanvas({
         ctx.fillText(t.text, p.x, p.y);
         break;
       }
+      case 'voice': {
+        drawVoiceAnnotation(ctx, ann as VoiceAnnotation, view, {
+          isDrawing,
+          hovered: opts?.hovered,
+          playing: opts?.playing,
+          nowTs: opts?.nowTs || performance.now(),
+        });
+        break;
+      }
     }
 
+    ctx.restore();
+  }
+
+  function drawVoiceAnnotation(
+    ctx: CanvasRenderingContext2D,
+    ann: VoiceAnnotation,
+    view: ViewState,
+    opts: {
+      isDrawing: boolean;
+      hovered?: boolean;
+      playing?: boolean;
+      nowTs: number;
+    },
+  ) {
+    const center = worldToScreen(ann.position, view);
+    const radiusScreen = Math.max(24, ann.radius * view.scale);
+
+    if (opts.playing) {
+      const t = ((opts.nowTs - pulseStartRef.current) % PLAYING_PULSE_PERIOD) / PLAYING_PULSE_PERIOD;
+      const pulseR = radiusScreen + t * radiusScreen * 0.8;
+      ctx.globalAlpha = 1 - t;
+      ctx.strokeStyle = ann.color;
+      ctx.lineWidth = 2 / view.scale;
+      ctx.beginPath();
+      ctx.arc(center.x, center.y, pulseR, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.strokeStyle = ann.color;
+    ctx.fillStyle = ann.color + (opts.hovered ? '40' : '25');
+    ctx.lineWidth = Math.max(2, 3 / view.scale);
+    ctx.beginPath();
+    ctx.arc(center.x, center.y, radiusScreen, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    const iconSize = Math.max(16, radiusScreen * 0.65);
+    drawSpeakerIcon(ctx, center.x, center.y, iconSize, ann.color);
+
+    const mins = Math.floor(ann.duration / 60);
+    const secs = Math.floor(ann.duration % 60);
+    const label = `${mins}:${secs.toString().padStart(2, '0')}`;
+    ctx.font = `${Math.max(10, 11 * Math.max(0.8, view.scale))}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = ann.color;
+    ctx.fillText(label, center.x, center.y + radiusScreen + Math.max(14, 14 * Math.max(0.8, view.scale)));
+    ctx.textAlign = 'left';
+  }
+
+  function drawSpeakerIcon(
+    ctx: CanvasRenderingContext2D,
+    cx: number,
+    cy: number,
+    size: number,
+    color: string,
+  ) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    const s = size / 24;
+    ctx.scale(s, s);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(-3, -6);
+    ctx.lineTo(-9, -6);
+    ctx.lineTo(-9, 6);
+    ctx.lineTo(-3, 6);
+    ctx.lineTo(5, 10);
+    ctx.lineTo(5, -10);
+    ctx.lineTo(-3, -6);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.arc(8, 0, 5, -Math.PI / 3, Math.PI / 3);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(10, 0, 8, -Math.PI / 3, Math.PI / 3);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawRecordingIndicator(
+    ctx: CanvasRenderingContext2D,
+    point: Point,
+    view: ViewState,
+    duration: number,
+    amplitude: number,
+  ) {
+    const p = worldToScreen(point, view);
+    const baseR = Math.max(28, DEFAULT_VOICE_RADIUS * view.scale);
+    const pulse = baseR + Math.sin(performance.now() / 200) * 4 + amplitude * baseR * 0.6;
+
+    ctx.save();
+    ctx.globalAlpha = 0.35;
+    ctx.fillStyle = '#ff3b30';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, pulse, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    ctx.strokeStyle = '#ff3b30';
+    ctx.lineWidth = Math.max(2, 3 / view.scale);
+    ctx.fillStyle = '#ff3b3040';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, baseR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#ff3b30';
+    const dotR = Math.max(6, 9 * Math.max(0.6, view.scale));
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, dotR, 0, Math.PI * 2);
+    ctx.fill();
+
+    const mins = Math.floor(duration / 60);
+    const secs = duration % 60;
+    const text = `${mins}:${secs.toString().padStart(2, '0')} ●REC`;
+    ctx.font = `bold ${Math.max(12, 13 * Math.max(0.9, view.scale))}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ff3b30';
+    ctx.fillText(text, p.x, p.y - baseR - Math.max(8, 8 * Math.max(0.8, view.scale)));
+    ctx.textAlign = 'left';
+
+    const waveCount = 5;
+    const waveWidth = 3 * Math.max(1, view.scale);
+    const waveMax = baseR * 0.5;
+    for (let i = 0; i < waveCount; i++) {
+      const x = p.x + (i - (waveCount - 1) / 2) * waveWidth * 2.4;
+      const h = (0.2 + Math.abs(Math.sin(performance.now() / 120 + i)) * 0.8) * waveMax * (amplitude * 3 + 0.5);
+      ctx.fillStyle = '#ff3b30';
+      ctx.fillRect(x - waveWidth / 2, p.y - h / 2, waveWidth, Math.max(2, h));
+    }
+
+    ctx.restore();
+  }
+
+  function drawUploadIndicator(
+    ctx: CanvasRenderingContext2D,
+    point: Point,
+    view: ViewState,
+    progress: number,
+  ) {
+    const p = worldToScreen(point, view);
+    const r = Math.max(28, DEFAULT_VOICE_RADIUS * view.scale);
+    ctx.save();
+    ctx.strokeStyle = '#007aff';
+    ctx.fillStyle = '#007aff20';
+    ctx.lineWidth = Math.max(2, 3 / view.scale);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.strokeStyle = '#007aff';
+    ctx.lineWidth = Math.max(3, 4 / view.scale);
+    ctx.arc(p.x, p.y, r + 5, -Math.PI / 2, -Math.PI / 2 + (progress / 100) * Math.PI * 2);
+    ctx.stroke();
+
+    ctx.font = `bold ${Math.max(12, 13 * Math.max(0.9, view.scale))}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#007aff';
+    ctx.fillText(`上传 ${progress}%`, p.x, p.y + 4);
+    ctx.textAlign = 'left';
     ctx.restore();
   }
 
@@ -207,7 +443,6 @@ export function AnnotationCanvas({
     ctx.fillStyle = 'white';
     ctx.strokeStyle = color;
     ctx.lineWidth = 3;
-    const textW = ctx.measureText(name).width;
     ctx.strokeText(name, p.x + 12, p.y + 12);
     ctx.fillText(name, p.x + 12, p.y + 12);
 
@@ -224,11 +459,42 @@ export function AnnotationCanvas({
     );
   };
 
-  const handleMouseDown = (e: React.MouseEvent) => {
+  function findVoiceAtPoint(point: Point, view: ViewState): VoiceAnnotation | null {
+    for (let i = annotations.length - 1; i >= 0; i--) {
+      const ann = annotations[i];
+      if (ann.tool !== 'voice') continue;
+      const va = ann as VoiceAnnotation;
+      const dist = getDistance(point, va.position);
+      if (dist <= va.radius) return va;
+    }
+    return null;
+  }
+
+  const handleMouseDown = async (e: React.MouseEvent) => {
     if (e.button !== 0) return;
-    if (tool === 'select') return;
+
+    if (recording.isRecording) return;
 
     const point = getCanvasPoint(e);
+    const v = viewRef.current;
+
+    if (tool === 'select' || tool === 'voice') {
+      const voice = findVoiceAtPoint(point, v);
+      if (voice) {
+        playVoice(voice);
+        return;
+      }
+    }
+
+    if (tool === 'voice') {
+      const id = generateId();
+      voiceAnchorRef.current = { point, id };
+      await startRecording();
+      return;
+    }
+
+    if (tool === 'select') return;
+
     startPointRef.current = point;
 
     const base = {
@@ -267,7 +533,15 @@ export function AnnotationCanvas({
 
   const handleMouseMove = (e: React.MouseEvent) => {
     const point = getCanvasPoint(e);
+    const v = viewRef.current;
 
+    if (tool === 'select' || tool === 'voice') {
+      const voice = findVoiceAtPoint(point, v);
+      const newHover = voice ? voice.id : null;
+      setHoverVoiceId((prev) => (prev === newHover ? prev : newHover));
+    }
+
+    if (recording.isRecording) return;
     if (!drawingRef.current) return;
 
     const ann = drawingRef.current;
@@ -303,7 +577,12 @@ export function AnnotationCanvas({
     onDrawingMove?.(ann);
   };
 
-  const handleMouseUp = () => {
+  const handleMouseUp = async () => {
+    if (recording.isRecording && voiceAnchorRef.current) {
+      await finishVoiceRecording();
+      return;
+    }
+
     if (!drawingRef.current) return;
     const ann = drawingRef.current;
     onDrawingEnd?.(ann);
@@ -311,7 +590,118 @@ export function AnnotationCanvas({
     setDrawingAnnotation(null);
   };
 
-  const cursorStyle = tool === 'select' ? 'default' : 'crosshair';
+  const handleMouseLeave = async () => {
+    if (recording.isRecording) {
+      await finishVoiceRecording();
+      return;
+    }
+    if (!drawingRef.current) return;
+    const ann = drawingRef.current;
+    onDrawingEnd?.(ann);
+    drawingRef.current = null;
+    setDrawingAnnotation(null);
+  };
+
+  async function finishVoiceRecording() {
+    const anchor = voiceAnchorRef.current;
+    voiceAnchorRef.current = null;
+
+    const result = await stopRecording();
+    if (!result || !anchor) {
+      cancelRecording();
+      scheduleRender();
+      return;
+    }
+
+    const tempId = anchor.id;
+    setUploading({ id: tempId, progress: 0 });
+
+    try {
+      const blueprintId = useCanvasStore.getState().blueprintId;
+      const uploadRes = await uploadVoice(
+        blueprintId,
+        result.blob,
+        result.duration,
+        (p) => setUploading({ id: tempId, progress: p }),
+      );
+
+      const userId = userIdRef.current;
+      const voiceAnn: VoiceAnnotation = {
+        id: uploadRes.id || tempId,
+        blueprintId,
+        userId,
+        userName: '当前用户',
+        color,
+        tool: 'voice',
+        position: anchor.point,
+        radius: DEFAULT_VOICE_RADIUS,
+        voiceUrl: uploadRes.url,
+        duration: uploadRes.duration || result.duration,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+
+      onDrawingEnd?.(voiceAnn);
+    } catch (err) {
+      console.error('Voice upload failed:', err);
+      alert('语音上传失败，请重试');
+    } finally {
+      setUploading(null);
+      scheduleRender();
+    }
+  }
+
+  function playVoice(ann: VoiceAnnotation) {
+    if (!ann.voiceUrl) return;
+
+    if (playingIdRef.current === ann.id && audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+      playingIdRef.current = null;
+      scheduleRender();
+      return;
+    }
+
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+
+    const audio = new Audio(ann.voiceUrl);
+    audioRef.current = audio;
+    playingIdRef.current = ann.id;
+    pulseStartRef.current = performance.now();
+
+    audio.onended = () => {
+      playingIdRef.current = null;
+      audioRef.current = null;
+      scheduleRender();
+    };
+    audio.onerror = () => {
+      playingIdRef.current = null;
+      audioRef.current = null;
+      scheduleRender();
+      alert('语音播放失败');
+    };
+
+    audio.play().catch((err) => {
+      console.warn('Play failed:', err);
+      alert('无法播放语音：' + (err?.message || '未知错误'));
+      playingIdRef.current = null;
+      audioRef.current = null;
+    });
+
+    scheduleRender();
+  }
+
+  let cursorStyle: string;
+  if (recording.isRecording) {
+    cursorStyle = 'progress';
+  } else if (tool === 'select' || tool === 'voice') {
+    cursorStyle = hoverVoiceId ? 'pointer' : 'default';
+  } else {
+    cursorStyle = 'crosshair';
+  }
 
   return (
     <div
@@ -320,7 +710,7 @@ export function AnnotationCanvas({
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
-      onMouseLeave={handleMouseUp}
+      onMouseLeave={handleMouseLeave}
     >
       <canvas
         ref={canvasRef}

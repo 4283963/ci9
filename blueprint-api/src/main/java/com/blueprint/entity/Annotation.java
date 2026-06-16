@@ -69,6 +69,17 @@ public class Annotation {
     @Column(columnDefinition = "jsonb")
     private Map<String, Object> position;
 
+    @Column(length = 512)
+    private String voiceUrl;
+
+    private Integer duration;
+
+    @Column(length = 255)
+    private String voiceId;
+
+    @Column(columnDefinition = "text")
+    private String transcript;
+
     @CreationTimestamp
     @Column(updatable = false)
     private LocalDateTime createdAt;

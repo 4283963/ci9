@@ -5,5 +5,6 @@ public enum AnnotationTool {
     PEN,
     RECT,
     CIRCLE,
-    TEXT
+    TEXT,
+    VOICE
 }

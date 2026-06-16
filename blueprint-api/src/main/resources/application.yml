@@ -33,6 +33,11 @@ blueprint:
   collab:
     heartbeat-interval: 30000
     max-idle-time: 300000
+  voice:
+    storage-path: /var/blueprint/voices
+    access-prefix: /api/voices
+    max-size-mb: 20
+    max-duration-sec: 300
 
 logging:
   level:
